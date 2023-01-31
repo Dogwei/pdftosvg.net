@@ -549,7 +549,9 @@ namespace PdfToSvg.Parsing
                         break;
 
                     default:
-                        throw ParserExceptions.UnexpectedCharacter(Stream, nextChar);
+                        Stream.Skip();
+                        break;
+                        // throw ParserExceptions.UnexpectedCharacter(Stream, nextChar);
                 }
             }
             while (result.Token == Token.None);
