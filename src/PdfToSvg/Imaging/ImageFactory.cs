@@ -34,12 +34,17 @@ namespace PdfToSvg.Imaging
             {
                 if (lastFilter.Filter == Filter.DctDecode)
                 {
-                    return JpegImage.IsSupported(colorSpace) ? new JpegImage(imageDictionary) : null;
+                    return new JpegImage(imageDictionary, colorSpace);
                 }
 
                 if (lastFilter.Filter == Filter.FlateDecode && KeepDataPngImage.IsSupported(imageDictionary, colorSpace))
                 {
                     return new KeepDataPngImage(imageDictionary, colorSpace);
+                }
+
+                if (lastFilter.Filter == Filter.CcittFaxDecode)
+                {
+                    return new CcittFaxImage(imageDictionary, lastFilter.DecodeParms, colorSpace);
                 }
             }
 

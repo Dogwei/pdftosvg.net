@@ -28,8 +28,8 @@ Impl | Description
 ✅ | CFF fonts
 ✅ | CID fonts
 ✅ | OpenType fonts
-❌ | Type 1 fonts
-❌ | Type 3 fonts
+✅ | Type 1 fonts
+✅ | Type 3 fonts
 
 
 ## Images
@@ -37,12 +37,15 @@ Impl | Description
 Impl | Description
 :--: | :----------
 ✅ | DCTDecode (JPEG)
-❌ | DCTDecode (JPEG) CMYK
+✅ | DCTDecode (JPEG) CMYK
+✅ | DCTDecode (JPEG) YCCK
+❌ | DCTDecode (JPEG) Progressive CMYK
+❌ | DCTDecode (JPEG) Progressive YCCK
 ✅ | FlateDecode without predictor
 ✅ | FlateDecode with PNG predictor
 ✅ | FlateDecode with TIFF predictor
 ✅ | FlateDecode CMYK
-❌ | CCITTFaxDecode
+✅ | CCITTFaxDecode
 ❌ | JBIG2Decode
 ❌ | JPXDecode (JPEG2000)
 ✅ | Crypt
@@ -188,8 +191,8 @@ Impl | Operator | Description
 ✅ | BI | Begin inline image
 ❌ | BMC | Begin marked-content seq
 ❌ | BX | Begin compatiblity section
-❌ | d0 | Glyph width (Type 3 font)
-❌ | d1 | Glyph width & bbox (Type 3 font)
+✅ | d0 | Glyph width (Type 3 font)
+✅ | d1 | Glyph width & bbox (Type 3 font)
 ✅ | Do | Invoke XObject (form & image)
 ❌ | DP | Define marked-content point
 ✅ | EI | End inline image

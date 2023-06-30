@@ -11,7 +11,8 @@ namespace PdfToSvg.Fonts
 {
     internal class FontException : PdfException
     {
-        public FontException(string message, Exception? innerException) : base(message + " " + innerException?.Message, innerException)
+        public FontException(string message, Exception? innerException = null) :
+            base(message + " " + innerException?.Message, innerException)
         {
         }
     }

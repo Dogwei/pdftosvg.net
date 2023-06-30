@@ -4,7 +4,7 @@
 
 using PdfToSvg.ColorSpaces;
 using PdfToSvg.DocumentModel;
-using PdfToSvg.IO;
+using PdfToSvg.Imaging.Jpeg;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -18,8 +18,9 @@ namespace PdfToSvg.Imaging
     internal class JpegImage : Image
     {
         private readonly PdfStream imageDictionaryStream;
+        private readonly ColorSpace colorSpace;
 
-        public JpegImage(PdfDictionary imageDictionary) : base("image/jpeg")
+        public JpegImage(PdfDictionary imageDictionary, ColorSpace colorSpace) : base("image/jpeg")
         {
             if (imageDictionary.Stream == null)
             {
@@ -27,58 +28,80 @@ namespace PdfToSvg.Imaging
             }
 
             this.imageDictionaryStream = imageDictionary.Stream;
+            this.colorSpace = colorSpace;
         }
 
-        public static bool IsSupported(ColorSpace colorSpace)
+        private byte[] Convert(byte[] sourceJpegData)
         {
-            return colorSpace is DeviceRgbColorSpace;
-        }
-
-        private Stream GetStream(CancellationToken cancellationToken)
-        {
-            Stream? resultStream = null;
-
-            var filters = imageDictionaryStream.Filters;
-            var encodedStream = imageDictionaryStream.Open(cancellationToken);
-
-            try
+            if (colorSpace is DeviceRgbColorSpace ||
+                colorSpace is DeviceGrayColorSpace)
             {
-                resultStream = filters.Take(filters.Count - 1).Decode(encodedStream);
+                return sourceJpegData;
             }
-            finally
+
+            var decoder = new JpegDecoder();
+            decoder.ReadMetadata(sourceJpegData, 0, sourceJpegData.Length);
+
+            var sourceColorSpace = decoder.ColorSpace;
+
+            if (sourceColorSpace == JpegColorSpace.YCbCr ||
+                sourceColorSpace == JpegColorSpace.Gray)
             {
-                if (resultStream == null)
+                return sourceJpegData;
+            }
+
+            if (!decoder.IsSupported)
+            {
+                // Possible cause: progressive JPEG.
+                // Just return it and hope for the best.
+                return sourceJpegData;
+            }
+
+            var encoder = new JpegEncoder();
+
+            encoder.Width = decoder.Width;
+            encoder.Height = decoder.Height;
+            encoder.ColorSpace = JpegColorSpace.YCbCr;
+            encoder.Quality = 90;
+
+            encoder.WriteMetadata();
+
+            foreach (var scan in decoder.ReadImageData())
+            {
+                var length = scan.Length;
+
+                if (sourceColorSpace == JpegColorSpace.Ycck)
                 {
-                    encodedStream.Dispose();
+                    length = JpegColorSpaceTransform.YcckToYcc(scan, 0, length);
                 }
+                else if (sourceColorSpace == JpegColorSpace.Cmyk)
+                {
+                    length = JpegColorSpaceTransform.CmykToYcc(scan, 0, length);
+                }
+                else
+                {
+                    throw new PdfException("Unexpected state. Color space should have been either YCCK or CMYK but was " + sourceColorSpace + ".");
+                }
+
+                encoder.WriteImageData(scan, 0, length);
             }
 
-            return resultStream;
+            encoder.WriteEndImage();
+
+            return encoder.ToByteArray();
         }
 
         public override byte[] GetContent(CancellationToken cancellationToken)
         {
-            var memoryStream = new MemoryStream();
-
-            using (var jpegStream = GetStream(cancellationToken))
-            {
-                jpegStream.CopyTo(memoryStream, cancellationToken);
-            }
-
-            return memoryStream.ToArray();
+            return Convert(ImageHelper.GetContent(imageDictionaryStream, cancellationToken));
         }
 
 #if HAVE_ASYNC
         public override async Task<byte[]> GetContentAsync(CancellationToken cancellationToken)
         {
-            var memoryStream = new MemoryStream();
-
-            using (var jpegStream = GetStream(cancellationToken))
-            {
-                await jpegStream.CopyToAsync(memoryStream, cancellationToken).ConfigureAwait(false);
-            }
-
-            return memoryStream.ToArray();
+            return Convert(await ImageHelper
+                .GetContentAsync(imageDictionaryStream, cancellationToken)
+                .ConfigureAwait(false));
         }
 #endif
     }

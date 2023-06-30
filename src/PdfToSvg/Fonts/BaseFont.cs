@@ -10,6 +10,7 @@ using PdfToSvg.Fonts.CompactFonts;
 using PdfToSvg.Fonts.OpenType;
 using PdfToSvg.Fonts.OpenType.Enums;
 using PdfToSvg.Fonts.OpenType.Tables;
+using PdfToSvg.Fonts.Type1;
 using PdfToSvg.Fonts.WidthMaps;
 using PdfToSvg.Fonts.Woff;
 using PdfToSvg.IO;
@@ -30,6 +31,7 @@ namespace PdfToSvg.Fonts
         private string? name;
 
         protected OpenTypeFont? openTypeFont;
+        protected SingleByteEncoding? openTypeFontEncoding;
         protected Exception? openTypeFontException;
 
         protected PdfDictionary fontDict = emptyDict;
@@ -53,6 +55,8 @@ namespace PdfToSvg.Fonts
 
         public Font SubstituteFont { get; private set; } = fallbackSubstituteFont;
 
+        public override bool CanBeExtracted => openTypeFont != null;
+
         protected BaseFont() { }
 
         protected virtual void OnInit(CancellationToken cancellationToken)
@@ -62,16 +66,18 @@ namespace PdfToSvg.Fonts
             // Read font
             try
             {
-                openTypeFont = GetOpenTypeFont(cancellationToken);
+                PopulateOpenTypeFont(cancellationToken);
+
+                if (openTypeFont != null)
+                {
+                    OpenTypeSanitizer.Sanitize(openTypeFont);
+                    HasGlyphSubstitutions = openTypeFont.Tables.Any(t => t.Tag == "GSUB");
+                }
             }
             catch (Exception ex)
             {
+                openTypeFont = null;
                 openTypeFontException = ex;
-            }
-
-            if (openTypeFont != null)
-            {
-                HasGlyphSubstitutions = openTypeFont.Tables.Any(t => t.Tag == "GSUB");
             }
 
             // ToUnicode
@@ -105,11 +111,42 @@ namespace PdfToSvg.Fonts
             chars.TryPopulate(GetChars, toUnicode, optimizeForEmbeddedFont: false);
         }
 
-        private OpenTypeFont? GetOpenTypeFont(CancellationToken cancellationToken)
+        private void PopulateOpenTypeFont(CancellationToken cancellationToken)
         {
             if (fontDict.TryGetDictionary(Names.FontDescriptor, out var fontDescriptor) ||
                 fontDict.TryGetDictionary(Names.DescendantFonts / Indexes.First / Names.FontDescriptor, out fontDescriptor))
             {
+                // FontFile (Type 1)
+                if (fontDescriptor.TryGetDictionary(Names.FontFile, out var fontFile) &&
+                    fontFile.Stream != null)
+                {
+                    if (!fontFile.TryGetInteger(Names.Length1, out var length1))
+                    {
+                        throw new FontException("Failed to parse Type 1 font. Missing Length1.");
+                    }
+
+                    if (!fontFile.TryGetInteger(Names.Length2, out var length2))
+                    {
+                        throw new FontException("Failed to parse Type 1 font. Missing Length2.");
+                    }
+
+                    try
+                    {
+                        using var fontFileStream = fontFile.Stream.OpenDecoded(cancellationToken);
+                        var fontFileData = fontFileStream.ToArray();
+                        var info = Type1Parser.Parse(fontFileData, length1, length2);
+
+                        openTypeFont = Type1Converter.ConvertToOpenType(info);
+                        openTypeFontEncoding = info.Encoding;
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new FontException("Failed to parse Type 1 font.", ex);
+                    }
+
+                    return;
+                }
+
                 // FontFile2 (TrueType)
                 if (fontDescriptor.TryGetStream(Names.FontFile2, out var fontFile2))
                 {
@@ -117,14 +154,14 @@ namespace PdfToSvg.Fonts
                     {
                         using var fontFileStream = fontFile2.OpenDecoded(cancellationToken);
                         var fontFileData = fontFileStream.ToArray();
-                        var openTypeFont = OpenTypeFont.Parse(fontFileData);
-                        OpenTypeSanitizer.Sanitize(openTypeFont);
-                        return openTypeFont;
+                        openTypeFont = OpenTypeFont.Parse(fontFileData);
                     }
                     catch (Exception ex)
                     {
                         throw new FontException("Failed to parse TrueType font.", ex);
                     }
+
+                    return;
                 }
 
                 // FontFile3 (CFF or OpenType)
@@ -136,9 +173,7 @@ namespace PdfToSvg.Fonts
                         {
                             using var fontFileStream = fontFile3.Stream.OpenDecoded(cancellationToken);
                             var fontFileData = fontFileStream.ToArray();
-                            var openTypeFont = OpenTypeFont.Parse(fontFileData);
-                            OpenTypeSanitizer.Sanitize(openTypeFont);
-                            return openTypeFont;
+                            openTypeFont = OpenTypeFont.Parse(fontFileData);
                         }
                         catch (Exception ex)
                         {
@@ -154,22 +189,19 @@ namespace PdfToSvg.Fonts
 
                             var compactFontSet = CompactFontParser.Parse(fontFileData, maxFontCount: 1);
 
-                            var openTypeFont = new OpenTypeFont();
+                            openTypeFont = new OpenTypeFont();
                             var cffTable = new CffTable { Content = compactFontSet };
                             openTypeFont.Tables.Add(cffTable);
-
-                            OpenTypeSanitizer.Sanitize(openTypeFont);
-                            return openTypeFont;
                         }
                         catch (Exception ex)
                         {
                             throw new FontException("Failed to parse CFF font.", ex);
                         }
                     }
+
+                    return;
                 }
             }
-
-            return null;
         }
 
         protected virtual IEnumerable<CharInfo> GetChars()
@@ -177,25 +209,108 @@ namespace PdfToSvg.Fonts
             yield break;
         }
 
-        private OpenTypeFont RecreateOpenTypeCMap(OpenTypeFont inputFont)
+        private void OverwriteOpenTypeGlyphWidths(OpenTypeFont inputFont)
         {
-            var font = new OpenTypeFont();
+            var head = inputFont.Tables.Get<HeadTable>();
+            var hhea = inputFont.Tables.Get<HheaTable>();
+            var maxp = inputFont.Tables.Get<MaxpTable>();
+            var hmtx = inputFont.Tables.Get<HmtxTable>();
 
-            var maxpTable = inputFont.Tables.Get<MaxpTable>();
-            var numGlyphs = maxpTable?.NumGlyphs ?? ushort.MaxValue;
-            var cmapTable = new CMapTable();
-            var nameTable = new NameTable();
-
-            foreach (var table in inputFont.Tables)
+            if (head == null || hhea == null || maxp == null || hmtx == null)
             {
-                if (table is not CMapTable && table is not NameTable)
+                return;
+            }
+
+            // Expand hmtx table with one entry per glyph
+            var originalMetrics = hmtx.HorMetrics;
+            var originalLsb = hmtx.LeftSideBearings;
+
+            hmtx.HorMetrics = new LongHorMetricRecord[maxp.NumGlyphs];
+            hmtx.LeftSideBearings = new short[0];
+            hhea.NumberOfHMetrics = maxp.NumGlyphs;
+
+            for (var i = 0; i < hmtx.HorMetrics.Length; i++)
+            {
+                var metric = hmtx.HorMetrics[i] = new LongHorMetricRecord();
+
+                if (i < originalMetrics.Length)
                 {
-                    font.Tables.Add(table);
+                    metric.AdvanceWidth = originalMetrics[i].AdvanceWidth;
+                    metric.LeftSideBearing = originalMetrics[i].LeftSideBearing;
+                }
+                else
+                {
+                    if (originalMetrics.Length > 0)
+                    {
+                        metric.AdvanceWidth = originalMetrics[originalMetrics.Length - 1].AdvanceWidth;
+                    }
+
+                    var lsbIndex = i - originalMetrics.Length;
+                    if (lsbIndex < originalLsb.Length)
+                    {
+                        metric.LeftSideBearing = originalLsb[lsbIndex];
+                    }
                 }
             }
 
-            font.Tables.Add(cmapTable);
-            font.Tables.Add(nameTable);
+            // Update hmtx metrics (it is used by Firefox)
+            foreach (var ch in chars)
+            {
+                if (ch.GlyphIndex == null)
+                {
+                    continue;
+                }
+
+                var width = widthMap.GetWidth(ch) * head.UnitsPerEm;
+                if (width != 0)
+                {
+                    hmtx.HorMetrics[(int)ch.GlyphIndex].AdvanceWidth =
+                        width <= ushort.MinValue ? ushort.MinValue :
+                        width >= ushort.MaxValue ? ushort.MaxValue :
+                        (ushort)width;
+                }
+            }
+
+            // Update CFF widths (they are used by Chrome)
+            var cff = inputFont.Tables.Get<CffTable>()?.Content?.Fonts[0];
+            if (cff != null)
+            {
+                var medianWidth = hmtx.HorMetrics
+                    .Select(glyph => glyph.AdvanceWidth)
+                    .OrderBy(width => width)
+                    .ElementAt(hmtx.HorMetrics.Length / 2);
+
+                cff.PrivateDict.DefaultWidthX = medianWidth;
+                cff.PrivateDict.NominalWidthX = medianWidth;
+
+                foreach (var fd in cff.FDArray)
+                {
+                    fd.PrivateDict.DefaultWidthX = medianWidth;
+                    fd.PrivateDict.NominalWidthX = medianWidth;
+                }
+
+                var count = Math.Min(cff.Glyphs.Count, hmtx.HorMetrics.Length);
+
+                for (var i = 0; i < count; i++)
+                {
+                    var cffGlyph = cff.Glyphs[i];
+                    var horMetric = hmtx.HorMetrics[i];
+
+                    cffGlyph.Width = horMetric.AdvanceWidth;
+                    cffGlyph.CharString.Width = horMetric.AdvanceWidth == medianWidth
+                        ? null // Use NominalWidthX
+                        : horMetric.AdvanceWidth - medianWidth;
+                }
+            }
+        }
+
+        private void RecreateOpenTypeCMap(OpenTypeFont font)
+        {
+            var maxpTable = font.Tables.Get<MaxpTable>();
+            var numGlyphs = maxpTable?.NumGlyphs ?? ushort.MaxValue;
+
+            var cmapTable = new CMapTable();
+            var nameTable = new NameTable();
 
             var allChars = chars
                 .Where(ch => ch.GlyphIndex != null)
@@ -217,7 +332,7 @@ namespace PdfToSvg.Fonts
             };
 
             nameTable.Version = 0;
-            nameTable.NameRecords = inputFont
+            nameTable.NameRecords = font
                 .Names
                 .Select(name => new NameRecord
                 {
@@ -233,10 +348,10 @@ namespace PdfToSvg.Fonts
 
                 .ToArray();
 
-            // This is mainly here to update some cmap dependent OS/2 fields
-            OpenTypeSanitizer.Sanitize(font);
-
-            return font;
+            font.Tables.Remove<NameTable>();
+            font.Tables.Remove<CMapTable>();
+            font.Tables.Add(cmapTable);
+            font.Tables.Add(nameTable);
         }
 
         private static BaseFont Create(PdfDictionary fontDict, CancellationToken cancellationToken)
@@ -313,8 +428,19 @@ namespace PdfToSvg.Fonts
 
             chars.TryPopulate(GetChars, toUnicode, optimizeForEmbeddedFont: true);
 
-            var preparedOtf = RecreateOpenTypeCMap(openTypeFont);
-            var binaryOtf = preparedOtf.ToByteArray();
+            var preparedFont = new OpenTypeFont();
+
+            foreach (var table in openTypeFont.Tables)
+            {
+                preparedFont.Tables.Add(table);
+            }
+
+            RecreateOpenTypeCMap(preparedFont);
+            OverwriteOpenTypeGlyphWidths(preparedFont);
+
+            OpenTypeSanitizer.Sanitize(preparedFont);
+
+            var binaryOtf = preparedFont.ToByteArray();
             return binaryOtf;
         }
 

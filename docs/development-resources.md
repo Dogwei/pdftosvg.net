@@ -15,12 +15,28 @@ Validate PDF files online. Good when constructing test files by hand.
 
 https://www.pdf-online.com/osa/validate.aspx
 
+
 ## PNG
 
 ### pngcheck
 Verifying the integrity of PNG files.
 
 http://www.libpng.org/pub/png/apps/pngcheck.html
+
+
+## JPEG
+
+### JPEGsnoop
+Shows information about JPEG files.
+
+https://github.com/ImpulseAdventure/JPEGsnoop
+
+### Let's Write a Simple JPEG Library
+Overview how the JPEG format works.
+
+https://koushtav.me/jpeg/tutorial/2017/11/25/lets-write-a-simple-jpeg-library-part-1/
+https://koushtav.me/jpeg/tutorial/c++/decoder/2019/03/02/lets-write-a-simple-jpeg-library-part-2/
+
 
 ## Fonts
 
@@ -53,3 +69,8 @@ https://github.com/khaledhosny/ots
 A description of OpenType and CFF.
 
 https://pomax.github.io/CFF-glyphlet-fonts/
+
+### Notes on reading Adobe font files
+Describes the .pfb file format.
+
+https://personal.math.ubc.ca/~cass/piscript/type1.pdf
